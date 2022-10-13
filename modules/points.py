@@ -9,6 +9,9 @@ class Points:
     def __add__(self, increment):
         return Points((self.x + increment[0], self.y + increment[1]))
 
+    def __sub__(self, increment):
+        return Points((self.x - increment[0], self.y - increment[1]))
+
     def __repr__(self):
         return "({}, {})".format(self.x, self.y)
 
