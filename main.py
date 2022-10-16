@@ -3,22 +3,36 @@ import pymunk.pygame_util
 import pygame
 import math
 from modules.points import Points
+from modules.constants import *
+
+# import time
+
 
 pygame.init()
 
-DISPLAY_SIZE = (1600, 900)
-FPS = 75
 SCREEN = pygame.display.set_mode(DISPLAY_SIZE)
-MAX_DISTANCE_ALLOWED = 60
-FORCE_CONST = 20
-RADIUS = 15
-FONT = pygame.font.SysFont("Times New Roman", 40, bold=True)
-START_POS = (400, 500)
+COUNTER_FONT = pygame.font.Font(FONT_DIR + "8bit.ttf", 30)
+HOLE_FONT = [
+    pygame.font.Font(FONT_DIR + "8bit_arcade_out.ttf", 120),
+    pygame.font.Font(FONT_DIR + "8bit_arcade_in.ttf", 120)
+]
+CONTINUE_FONT = pygame.font.Font(FONT_DIR + "8bit.ttf", 20)
+BALL_IMG = pygame.image.load(IMG_DIR+"golf_ball.png").convert_alpha()
+GRASS_IMG = pygame.image.load(IMG_DIR+"grass.png").convert_alpha()
 
-BALL_IMG = pygame.image.load("images/golf_ball.png").convert_alpha()
-BALL_IMG = pygame.transform.scale(BALL_IMG, (32, 32))
-GRASS_IMG = pygame.image.load("images/grass.png").convert_alpha()
-GRASS_IMG = pygame.transform.scale(GRASS_IMG, (285, 70))
+FRAME_COUNTER = 0
+LEVEL = -1
+
+COLL_TYPE_BALL = 1
+COLL_TYPE_HOLE = 2
+COLL_TYPE_OBS = 3
+
+
+def get_frame(spritesheet, frame):
+    image = pygame.Surface((32, 32)).convert_alpha()
+    image.set_colorkey("black")
+    image.blit(spritesheet, (0, 0), (frame*32, 0, 32, 32), )
+    return image
 
 
 def draw(space, screen, draw_options, points):
@@ -27,139 +41,222 @@ def draw(space, screen, draw_options, points):
 
     # draw grass
     x = -1
-    for i in range(6):
-        screen.blit(GRASS_IMG, (x, 842))
+    for i in range(1):
+        # screen.blit(GRASS_IMG, (x, 820))
         x += 284
 
     # draw power line
     if points:
         point_a = (points[0].x, points[0].y)
         point_b = (points[1].x, points[1].y)
-        pygame.draw.line(screen, "black", point_a, point_b, width=4)
+        pygame.draw.line(screen, "red", point_a, point_b, width=6)
 
 
 def refresh(screen, ball):
-    screen.blit(BALL_IMG, (ball.body.position.x - RADIUS, ball.body.position.y - RADIUS))
+    global BALL_IMG
+    angle = (ball.body.angle*57.2958) % 360
+    ball_frame = get_frame(BALL_IMG, angle//20)
+    screen.blit(ball_frame, (ball.body.position.x - BALL_RADIUS, ball.body.position.y - BALL_RADIUS))
     pygame.display.update()
 
 
-def add_object(space, pos):
+def create_ball(space, pos):
     body = pymunk.Body()
     body.position = pos
-    shape = pymunk.Circle(body, radius=RADIUS)
+    shape = pymunk.Circle(body, radius=BALL_RADIUS)
     shape.mass = 1
     shape.color = (255, 0, 0, 100)
     shape.elasticity = 0.6
     shape.friction = 0.5
+    shape.collision_type = COLL_TYPE_BALL
     space.add(body, shape)
     return shape
 
 
-def create_obstacles(space, screen_size):
-    rectangle = [
-        [(screen_size[0]/2, screen_size[1]-5), (screen_size[0], 80)],
-    ]
-
-    for position, size in rectangle:
+def create_obstacles(space):
+    shapes = []
+    for rectangle in OBSTACLES_XY[LEVEL]:
         body = pymunk.Body(body_type=pymunk.Body.STATIC)
-        body.position = position
-        shape = pymunk.Poly.create_box(body, size)
-        shape.elasticity = 0.6
+        body.position = (0, 0)
+        shape = pymunk.Poly(body, rectangle)
         shape.friction = 0.2
+        shape.elasticity = 0.6
+        shape.collision_type = COLL_TYPE_OBS
         space.add(body, shape)
+        shapes.append(shape)
+    return shapes
+
+
+def create_hole(space):
+    body = pymunk.Body(body_type=pymunk.Body.STATIC)
+    body.position = (0, 0)
+    shape = pymunk.Poly(body, HOLE_XY[LEVEL])
+    shape.color = (219, 245, 39, 0.8)
+    shape.collision_type = COLL_TYPE_HOLE
+    space.add(body, shape)
+    return shape
+
+
+def create_level(space):
+    return [create_ball(space, BALL_XY[LEVEL]), create_obstacles(space), create_hole(space)]
+
+
+def remove_level(space, obj):
+    space.remove(obj[0], obj[0].body)
+    for _obj in obj[1]:
+        space.remove(_obj, _obj.body)
+    space.remove(obj[2], obj[2].body)
 
 
 def is_ingame(ball):
     return ball.body.position.y < DISPLAY_SIZE[1]
 
-def module_damping(space, ball):
-    print(space.damping)
-    if ball.body.velocity.y < 1 and space.damping == 1:
-        space.damping = 0.9
-    elif ball.body.velocity.y < 1 and space.damping > 0.3:
-        space.damping -= 0.03
-    elif ball.body.velocity.y < 1 and space.damping <= 0.3:
-        pass
+
+def in_hole(ball):
+    hole = Points(((HOLE_XY[LEVEL][0][0] + HOLE_XY[LEVEL][2][0])/2, HOLE_XY[LEVEL][1][1]))
+    return hole.check_distance(Points(ball.body.position), MAX_INHOLE_DISTANCE)
+
+
+def in_hole_screen(screen, n_shot):
+    text = HOLE_FONT[1].render("HOLE IN {} SHOT".format(n_shot), True, "black")
+    text.blit(HOLE_FONT[0].render("HOLE IN {} SHOT".format(n_shot), True, "red"), (0, 0))
+    screen.blit(text, (DISPLAY_SIZE[0]/2, DISPLAY_SIZE[1]/2))
+
+
+def parable(x):
+    y = (x**2)/1800
+    return round(y, 3)
+
+
+def module_damping(space, ball, moving):
+    global FRAME_COUNTER
+    if moving:
+        if abs(ball.body.velocity) > 40:
+            space.damping = 0.5
+        else:
+            if FRAME_COUNTER < MAX_FRAME_DAMPING:
+                space.damping = 0.5 - parable(FRAME_COUNTER)
+                FRAME_COUNTER += 0.5
     else:
-        space.damping = 1
+        space.damping = 0.5
 
 
-def run(screen, size):
-    _run = True
+def create_collision_handler(space):
+    return [
+        space.add_collision_handler(COLL_TYPE_BALL, COLL_TYPE_HOLE),
+        space.add_collision_handler(COLL_TYPE_BALL, COLL_TYPE_OBS)
+    ]
+
+
+def run(screen, size):  # , size):
+    global LEVEL
     clock = pygame.time.Clock()
     space = pymunk.Space()
-    space.damping = 0.4
-    space.gravity = (0, 981)
+    space.gravity = (0, GRAVITY)
     draw_options = pymunk.pygame_util.DrawOptions(screen)
-    ball = add_object(space, START_POS)
-    create_obstacles(space, size)
     start_point = None
     points_to_draw = []
     clicked = False
     moving = False
     shot_counter = 0
     last_pos = None
-    while _run:
-        module_damping(space, ball)
-        if not is_ingame(ball):
-            space.remove(ball, ball.body)
-            ball = add_object(space, last_pos)
+    hole = False
+    new_level = True
+    obj = [None]
+    obj[0] = None
+    coll_handler = []
+    while True:
+        if new_level:
+            LEVEL += 1
+            if LEVEL == MAX_LEVEL:
+                return 0
+            new_level = False
+            if obj[0]:
+                remove_level(space, obj)
+            obj = create_level(space)
+            coll_handler = create_collision_handler(space)
+        if not hole:
+            module_damping(space, obj[0], moving)
+            if in_hole(obj[0]):
+                hole = True
 
-        if abs(ball.body.velocity) < 4 and moving:
-            ball.body.body_type = pymunk.Body.STATIC
-            ball.body.angle = 0
-            moving = False
-        new_point = Points(pygame.mouse.get_pos())
+            # check_hole_collision(coll_handler[0])
+            # check_obs_collision(coll_handler[1])
 
-        if start_point:
-            angle = start_point.angle(new_point)
+            if not is_ingame(obj[0]):
+                space.remove(obj[0], obj[0].body)
+                obj[0] = create_ball(space, last_pos)
 
-            if start_point.check_distance(new_point, MAX_DISTANCE_ALLOWED):
-                x_increment = math.cos(angle)*start_point.distance(new_point)
-                y_increment = -math.sin(angle)*start_point.distance(new_point)
+            if abs(obj[0].body.velocity) < 4 and moving:
+                obj[0].body.body_type = pymunk.Body.STATIC
+                obj[0].body.angle = 0
+                obj[0].body.body_type = pymunk.Body.DYNAMIC
+                moving = False
+            new_point = Points(pygame.mouse.get_pos())
 
-            else:
-                x_increment = math.cos(angle)*MAX_DISTANCE_ALLOWED
-                y_increment = -math.sin(angle)*MAX_DISTANCE_ALLOWED
+            if start_point:
+                angle = start_point.angle(new_point)
 
-            ball_position = Points((ball.body.position.x, ball.body.position.y))
-            points_to_draw = [ball_position, ball_position + (x_increment, y_increment)]
+                if start_point.check_distance(new_point, MAX_POWERLINE_LEN):
+                    x_increment = math.cos(angle)*start_point.distance(new_point)
+                    y_increment = -math.sin(angle)*start_point.distance(new_point)
+
+                else:
+                    x_increment = math.cos(angle) * MAX_POWERLINE_LEN
+                    y_increment = -math.sin(angle) * MAX_POWERLINE_LEN
+
+                ball_position = Points((obj[0].body.position.x, obj[0].body.position.y))
+                points_to_draw = [ball_position, ball_position + (x_increment, y_increment)]
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                _run = False
-                break
+                return 0
 
-            if abs(ball.body.velocity) < 4:
+            if abs(obj[0].body.velocity) < 4 and not hole:
                 if event.type == pygame.MOUSEBUTTONDOWN and not moving:
-                    ball.body.body_type = pymunk.Body.DYNAMIC
                     start_point = Points(pygame.mouse.get_pos())
                     clicked = True
 
                 if event.type == pygame.MOUSEBUTTONUP and clicked:
                     shot_counter += 1
-                    last_pos = ball.body.position
+                    last_pos = obj[0].body.position
                     angle = start_point.angle(new_point)
                     abs_force = points_to_draw[0].distance(points_to_draw[1])
-                    x_force = math.cos(angle)*abs_force*FORCE_CONST
-                    y_force = math.sin(angle)*abs_force*FORCE_CONST
-                    ball.body.apply_impulse_at_local_point(impulse=(-x_force, y_force), point=(0, 0))
+                    x_force = math.cos(angle)*abs_force*FORCE_MULTIPLIER
+                    y_force = math.sin(angle)*abs_force*FORCE_MULTIPLIER
+                    obj[0].body.apply_impulse_at_local_point(impulse=(-x_force, y_force), point=(0, 0))
                     start_point = None
                     points_to_draw = []
                     clicked = False
                     moving = True
 
+            if hole and event.type == pygame.MOUSEBUTTONDOWN:
+                hole = False
+                new_level = True
+                shot_counter = 0
+
         draw(space, screen, draw_options, points_to_draw)
 
-        if shot_counter > 0:
-            text = FONT.render("Shot: {}".format(shot_counter), True, "black")
+        if shot_counter > 0 and not hole:
+            text = COUNTER_FONT.render("SHOT: {}".format(shot_counter), True, "black")
             screen.blit(text, (10, 10))
 
-        refresh(screen, ball)
+        if hole:
+            print("asshole")
+            moving = False
+            hole_text = HOLE_FONT[1].render("HOLE IN {}".format(shot_counter), True, "yellow")
+            hole_text.blit(HOLE_FONT[0].render("HOLE IN {}".format(shot_counter), True, "green"), (0, 0))
+            hole_text_rect = hole_text.get_rect(center=(DISPLAY_SIZE[0]/2, DISPLAY_SIZE[1]/2))
+            continue_text = CONTINUE_FONT.render("Click to continue...", True, "black")
+            continue_text_rect = continue_text.get_rect(center=(DISPLAY_SIZE[0]/2, DISPLAY_SIZE[1]/2 + 70))
+            screen.blit(hole_text, hole_text_rect)
+            screen.blit(continue_text, continue_text_rect)
+
+        refresh(screen, obj[0])
         space.step(1 / FPS)
         clock.tick(FPS)
-    pygame.quit()
 
 
 if __name__ == "__main__":
-    run(SCREEN, DISPLAY_SIZE)
+    if not run(SCREEN, DISPLAY_SIZE):
+        pygame.quit()
