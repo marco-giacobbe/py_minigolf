@@ -29,6 +29,7 @@ class Ball:
             self.body.body_type = pymunk.Body.DYNAMIC
             self.body.angle = 0
             self.shape.collision_type = COLL_TYPE_BALL
+        self.in_game()
 
     def in_hole(self, arbiter, space, data):
         self.hole = True
